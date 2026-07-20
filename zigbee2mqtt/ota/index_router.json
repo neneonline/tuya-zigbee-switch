@@ -26,5 +26,19 @@
       "_TZ3002_pzao9ls1",
       "pzao9ls1"
     ]
+  },
+  {
+    "fileName": "tlc_switch-1.1.2-d9f73f5f.zigbee",
+    "fileVersion": 285356048,
+    "fileSize": 181698,
+    "url": "https://github.com/neneonline/tuya-zigbee-switch/raw/refs/heads/feat/multigesture-fixes/bin/router/SWITCH_BSEED_TS0726_1GANG/tlc_switch-1.1.2-d9f73f5f.zigbee",
+    "imageType": 45580,
+    "manufacturerCode": 4417,
+    "sha512": "13095c072b25ec3f15f7b4b34aafa4d8ea46f8839e0ab8b71534130f8166058fa8e6b1d60e05c2dfcdd8f192654380f33f7d33f50ed59de09de73617a9960a76",
+    "otaHeaderString": "Telink OTA Image\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000",
+    "manufacturerName": [
+      "_TZ3002_jn2x20tg",
+      "jn2x20tg"
+    ]
   }
 ]
