@@ -114,8 +114,13 @@ const romasku = {
             endpointNames: [endpointName],
             cluster: "genOnOffSwitchCfg",
             attribute: { ID: 0xff06, type: 0x21 }, // uint16
-            description: "Time (ms) to wait after release before confirming press count (single vs double etc.)",
-            valueMin: 0,
+            description: "Time (ms) to wait after release before confirming the press count. " +
+                "Only applies when max_press_count is above 1; a longer window makes double " +
+                "presses easier to hit but delays every single press by that much. " +
+                "0 is treated as 'use the default'.",
+            // 0 is the "use the default" sentinel, not zero delay — offering it
+            // here would just be a way to silently get 200.
+            valueMin: 1,
             valueMax: 2000,
             entityCategory: "config",
         }),
@@ -125,10 +130,34 @@ const romasku = {
             endpointNames: [endpointName],
             cluster: "genOnOffSwitchCfg",
             attribute: { ID: 0xff07, type: 0x20 }, // uint8
-            description: "Maximum number of consecutive presses to differentiate (1=single only, 2=single+double, 3=+triple)",
+            description: "Maximum number of consecutive presses to differentiate " +
+                "(1=single only, 2=single+double, 3=+triple). Leave at 1 for the fastest " +
+                "response: the press is then reported on release with no confirmation wait. " +
+                "Raising it enables multi-press on this button at the cost of confirm_release_ms " +
+                "of added delay on every single press.",
             valueMin: 1,
             valueMax: 3,
             entityCategory: "config",
+        }),
+    // Raw multistate value as a diagnostic sensor. The `action` above is the
+    // supported way to drive automations; this stays because it is what existing
+    // setups are built on, and it is the only place the transient press/released
+    // states are visible.
+    pressAction: (name, endpointName) =>
+        enumLookup({
+            name,
+            endpointName,
+            access: "STATE_GET",
+            lookup: {
+                released: 0, press: 1, long_press: 2, position_on: 3, position_off: 4,
+                single_press: 5, single_release: 6,
+                double_press: 7, double_hold: 8, double_release: 9,
+                triple_press: 10, triple_hold: 11, triple_release: 12,
+            },
+            cluster: "genMultistateInput",
+            attribute: "presentValue",
+            description: "Action of the switch: press/long_press/single_press/double_press/triple_press etc.",
+            entityCategory: "diagnostic",
         }),
     relayIndicatorMode: (name, endpointName) =>
         enumLookup({
@@ -372,13 +401,52 @@ const romasku = {
         }),
 };
 
-// Multistate presentValue → action suffix mapping (values 0 and 1 are not published)
-const SWITCH_MULTISTATE_ACTION_MAP = {
+// Multistate presentValue → action suffix.
+//
+// The same presentValue means different things depending on the firmware the
+// device is running, so there are two maps:
+//
+//   - Firmware without multi-press reports a short press as PRESS (1) and has no
+//     concept of a confirmed press count. 1 is the whole signal.
+//   - Firmware with multi-press treats 1 as a transient that is superseded by a
+//     confirmed value once the press count is known (5 = single, 7 = double, …).
+//     Publishing on 1 there would fire an action on every tap and then fire
+//     again with the real result.
+//
+// Both maps use the same action vocabulary, so an automation written against
+// `<switch>_single` works on either firmware and the distinction stays invisible.
+const SWITCH_MULTISTATE_ACTION_MAP_LEGACY = {
+    1: 'single',       2: 'single_hold',      3: 'position_on',  4: 'position_off',
+};
+const SWITCH_MULTISTATE_ACTION_MAP_MULTI = {
     2: 'single_hold',  3: 'position_on',      4: 'position_off',
     5: 'single',       6: 'single_release',
     7: 'double',       8: 'double_hold',      9: 'double_release',
     10: 'triple',      11: 'triple_hold',     12: 'triple_release',
 };
+
+// numberOfStates tells the two firmwares apart: firmware without multi-press
+// advertises a fixed 3, multi-press firmware advertises 3 * max_press_count + 4,
+// which is 7 at its lowest. The gap is narrow — if either number ever changes,
+// this threshold has to move with it.
+const SWITCH_MULTISTATE_MULTI_MIN_STATES = 7;
+
+function switchMultistateActionSuffix(endpoint, presentValue) {
+    // Populated by the read in configure(). If it is missing — device not
+    // configured yet, or the read failed — fall back to the legacy map: an extra
+    // action is recoverable, a button that reports nothing at all is not.
+    // Declared return type is number | string | undefined, so coerce before
+    // comparing. Number(undefined) is NaN and Number(null) is 0; both fail the
+    // check below and land on the legacy map, which is the safe direction.
+    const numberOfStates = Number(endpoint.getClusterAttributeValue(
+        "genMultistateInput", "numberOfStates"));
+    const isMultiPress = Number.isFinite(numberOfStates) &&
+        numberOfStates >= SWITCH_MULTISTATE_MULTI_MIN_STATES;
+    const map = isMultiPress
+        ? SWITCH_MULTISTATE_ACTION_MAP_MULTI
+        : SWITCH_MULTISTATE_ACTION_MAP_LEGACY;
+    return map[presentValue];
+}
 
 const definitions = [
 {% for device in devices %}
@@ -447,9 +515,9 @@ const definitions = [
             {% if device.switchNames %}
             {%- set ns = device.switchNames | length -%}
             {%- set action_values = [] -%}
-            {%- for i in range(1, ns + 1) -%}
+            {%- for switchName in device.switchNames -%}
                 {%- for s in ['single', 'single_hold', 'single_release', 'double', 'double_hold', 'double_release', 'triple', 'triple_hold', 'triple_release', 'position_on', 'position_off'] -%}
-                    {%- set _ = action_values.append(i ~ '_' ~ s) -%}
+                    {%- set _ = action_values.append(switchName ~ '_' ~ s) -%}
                 {%- endfor -%}
             {%- endfor -%}
             {
@@ -457,10 +525,13 @@ const definitions = [
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
                     convert: (model, msg, publish, options, meta) => {
-                        if (msg.endpoint.ID > {{ns}}) return;
-                        const suffix = SWITCH_MULTISTATE_ACTION_MAP[msg.data['presentValue']];
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = {{ device.switchNames | tojson }};
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
                         if (suffix === undefined) return;
-                        return {action: `${msg.endpoint.ID}_${suffix}`};
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
                     },
                 }],
                 toZigbee: [],
@@ -468,6 +539,7 @@ const definitions = [
             },
             {% endif %}
             {% for switchName in device.switchNames %}
+            romasku.pressAction("{{switchName}}_press_action", "{{switchName}}"),
             romasku.switchMode("{{switchName}}_mode", "{{switchName}}"),
             romasku.switchAction("{{switchName}}_action_mode", "{{switchName}}"),
             {% if device.relayNames %}
@@ -511,6 +583,10 @@ const definitions = [
             {% for switchName in device.switchNames %}
             const endpoint{{loop.index}} = device.getEndpoint({{loop.index}});
             await reporting.bind(endpoint{{loop.index}}, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint{{loop.index}}.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint{{loop.index}}.configureReporting("genMultistateInput", [
                 {

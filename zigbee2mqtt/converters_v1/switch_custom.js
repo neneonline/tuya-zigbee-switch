@@ -12,6 +12,7 @@ const {assertString} = require("zigbee-herdsman-converters/lib/utils");
 const reporting = require("zigbee-herdsman-converters/lib/reporting");
 const constants = require("zigbee-herdsman-converters/lib/constants");
 const Zcl = require('zigbee-herdsman').Zcl;
+const e = require("zigbee-herdsman-converters/lib/exposes");
 const ota = require("zigbee-herdsman-converters/lib/ota");
 
 /********************************************************************
@@ -111,8 +112,13 @@ const romasku = {
             endpointNames: [endpointName],
             cluster: "genOnOffSwitchCfg",
             attribute: { ID: 0xff06, type: 0x21 }, // uint16
-            description: "Time (ms) to wait after release before confirming press count (single vs double etc.)",
-            valueMin: 0,
+            description: "Time (ms) to wait after release before confirming the press count. " +
+                "Only applies when max_press_count is above 1; a longer window makes double " +
+                "presses easier to hit but delays every single press by that much. " +
+                "0 is treated as 'use the default'.",
+            // 0 is the "use the default" sentinel, not zero delay — offering it
+            // here would just be a way to silently get 200.
+            valueMin: 1,
             valueMax: 2000,
             entityCategory: "config",
         }),
@@ -122,11 +128,19 @@ const romasku = {
             endpointNames: [endpointName],
             cluster: "genOnOffSwitchCfg",
             attribute: { ID: 0xff07, type: 0x20 }, // uint8
-            description: "Maximum number of consecutive presses to differentiate (1=single only, 2=single+double, 3=+triple)",
+            description: "Maximum number of consecutive presses to differentiate " +
+                "(1=single only, 2=single+double, 3=+triple). Leave at 1 for the fastest " +
+                "response: the press is then reported on release with no confirmation wait. " +
+                "Raising it enables multi-press on this button at the cost of confirm_release_ms " +
+                "of added delay on every single press.",
             valueMin: 1,
             valueMax: 3,
             entityCategory: "config",
         }),
+    // Raw multistate value as a diagnostic sensor. The `action` above is the
+    // supported way to drive automations; this stays because it is what existing
+    // setups are built on, and it is the only place the transient press/released
+    // states are visible.
     pressAction: (name, endpointName) =>
         enumLookup({
             name,
@@ -385,6 +399,53 @@ const romasku = {
         }),
 };
 
+// Multistate presentValue → action suffix.
+//
+// The same presentValue means different things depending on the firmware the
+// device is running, so there are two maps:
+//
+//   - Firmware without multi-press reports a short press as PRESS (1) and has no
+//     concept of a confirmed press count. 1 is the whole signal.
+//   - Firmware with multi-press treats 1 as a transient that is superseded by a
+//     confirmed value once the press count is known (5 = single, 7 = double, …).
+//     Publishing on 1 there would fire an action on every tap and then fire
+//     again with the real result.
+//
+// Both maps use the same action vocabulary, so an automation written against
+// `<switch>_single` works on either firmware and the distinction stays invisible.
+const SWITCH_MULTISTATE_ACTION_MAP_LEGACY = {
+    1: 'single',       2: 'single_hold',      3: 'position_on',  4: 'position_off',
+};
+const SWITCH_MULTISTATE_ACTION_MAP_MULTI = {
+    2: 'single_hold',  3: 'position_on',      4: 'position_off',
+    5: 'single',       6: 'single_release',
+    7: 'double',       8: 'double_hold',      9: 'double_release',
+    10: 'triple',      11: 'triple_hold',     12: 'triple_release',
+};
+
+// numberOfStates tells the two firmwares apart: firmware without multi-press
+// advertises a fixed 3, multi-press firmware advertises 3 * max_press_count + 4,
+// which is 7 at its lowest. The gap is narrow — if either number ever changes,
+// this threshold has to move with it.
+const SWITCH_MULTISTATE_MULTI_MIN_STATES = 7;
+
+function switchMultistateActionSuffix(endpoint, presentValue) {
+    // Populated by the read in configure(). If it is missing — device not
+    // configured yet, or the read failed — fall back to the legacy map: an extra
+    // action is recoverable, a button that reports nothing at all is not.
+    // Declared return type is number | string | undefined, so coerce before
+    // comparing. Number(undefined) is NaN and Number(null) is 0; both fail the
+    // check below and land on the legacy map, which is the safe direction.
+    const numberOfStates = Number(endpoint.getClusterAttributeValue(
+        "genMultistateInput", "numberOfStates"));
+    const isMultiPress = Number.isFinite(numberOfStates) &&
+        numberOfStates >= SWITCH_MULTISTATE_MULTI_MIN_STATES;
+    const map = isMultiPress
+        ? SWITCH_MULTISTATE_ACTION_MAP_MULTI
+        : SWITCH_MULTISTATE_ACTION_MAP_LEGACY;
+    return map[presentValue];
+}
+
 const definitions = [
     {
         zigbeeModel: [
@@ -399,6 +460,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_0"),
             romasku.networkIndicator("network_led", "switch_0"),
             onOff({ endpointNames: ["relay_0", "relay_1", "relay_2", "relay_3"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_0", "switch_1", "switch_2", "switch_3"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_0_single", "switch_0_single_hold", "switch_0_single_release", "switch_0_double", "switch_0_double_hold", "switch_0_double_release", "switch_0_triple", "switch_0_triple_hold", "switch_0_triple_release", "switch_0_position_on", "switch_0_position_off", "switch_1_single", "switch_1_single_hold", "switch_1_single_release", "switch_1_double", "switch_1_double_hold", "switch_1_double_release", "switch_1_triple", "switch_1_triple_hold", "switch_1_triple_release", "switch_1_position_on", "switch_1_position_off", "switch_2_single", "switch_2_single_hold", "switch_2_single_release", "switch_2_double", "switch_2_double_hold", "switch_2_double_release", "switch_2_triple", "switch_2_triple_hold", "switch_2_triple_release", "switch_2_position_on", "switch_2_position_off", "switch_3_single", "switch_3_single_hold", "switch_3_single_release", "switch_3_double", "switch_3_double_hold", "switch_3_double_release", "switch_3_triple", "switch_3_triple_hold", "switch_3_triple_release", "switch_3_position_on", "switch_3_position_off"])],
+            },
             romasku.pressAction("switch_0_press_action", "switch_0"),
             romasku.switchMode("switch_0_mode", "switch_0"),
             romasku.switchAction("switch_0_action_mode", "switch_0"),
@@ -444,6 +522,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -455,6 +537,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -466,6 +552,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -477,6 +567,10 @@ const definitions = [
             ]);
             const endpoint4 = device.getEndpoint(4);
             await reporting.bind(endpoint4, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint4.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint4.configureReporting("genMultistateInput", [
                 {
@@ -529,6 +623,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_0"),
             romasku.networkIndicator("network_led", "switch_0"),
             onOff({ endpointNames: ["relay_0", "relay_1", "relay_2", "relay_3"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_0", "switch_1", "switch_2", "switch_3"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_0_single", "switch_0_single_hold", "switch_0_single_release", "switch_0_double", "switch_0_double_hold", "switch_0_double_release", "switch_0_triple", "switch_0_triple_hold", "switch_0_triple_release", "switch_0_position_on", "switch_0_position_off", "switch_1_single", "switch_1_single_hold", "switch_1_single_release", "switch_1_double", "switch_1_double_hold", "switch_1_double_release", "switch_1_triple", "switch_1_triple_hold", "switch_1_triple_release", "switch_1_position_on", "switch_1_position_off", "switch_2_single", "switch_2_single_hold", "switch_2_single_release", "switch_2_double", "switch_2_double_hold", "switch_2_double_release", "switch_2_triple", "switch_2_triple_hold", "switch_2_triple_release", "switch_2_position_on", "switch_2_position_off", "switch_3_single", "switch_3_single_hold", "switch_3_single_release", "switch_3_double", "switch_3_double_hold", "switch_3_double_release", "switch_3_triple", "switch_3_triple_hold", "switch_3_triple_release", "switch_3_position_on", "switch_3_position_off"])],
+            },
             romasku.pressAction("switch_0_press_action", "switch_0"),
             romasku.switchMode("switch_0_mode", "switch_0"),
             romasku.switchAction("switch_0_action_mode", "switch_0"),
@@ -574,6 +685,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -585,6 +700,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -596,6 +715,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -607,6 +730,10 @@ const definitions = [
             ]);
             const endpoint4 = device.getEndpoint(4);
             await reporting.bind(endpoint4, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint4.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint4.configureReporting("genMultistateInput", [
                 {
@@ -659,6 +786,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_0"),
             romasku.networkIndicator("network_led", "switch_0"),
             onOff({ endpointNames: ["relay_0", "relay_1", "relay_2", "relay_3"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_0", "switch_1", "switch_2", "switch_3"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_0_single", "switch_0_single_hold", "switch_0_single_release", "switch_0_double", "switch_0_double_hold", "switch_0_double_release", "switch_0_triple", "switch_0_triple_hold", "switch_0_triple_release", "switch_0_position_on", "switch_0_position_off", "switch_1_single", "switch_1_single_hold", "switch_1_single_release", "switch_1_double", "switch_1_double_hold", "switch_1_double_release", "switch_1_triple", "switch_1_triple_hold", "switch_1_triple_release", "switch_1_position_on", "switch_1_position_off", "switch_2_single", "switch_2_single_hold", "switch_2_single_release", "switch_2_double", "switch_2_double_hold", "switch_2_double_release", "switch_2_triple", "switch_2_triple_hold", "switch_2_triple_release", "switch_2_position_on", "switch_2_position_off", "switch_3_single", "switch_3_single_hold", "switch_3_single_release", "switch_3_double", "switch_3_double_hold", "switch_3_double_release", "switch_3_triple", "switch_3_triple_hold", "switch_3_triple_release", "switch_3_position_on", "switch_3_position_off"])],
+            },
             romasku.pressAction("switch_0_press_action", "switch_0"),
             romasku.switchMode("switch_0_mode", "switch_0"),
             romasku.switchAction("switch_0_action_mode", "switch_0"),
@@ -704,6 +848,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -715,6 +863,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -726,6 +878,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -737,6 +893,10 @@ const definitions = [
             ]);
             const endpoint4 = device.getEndpoint(4);
             await reporting.bind(endpoint4, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint4.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint4.configureReporting("genMultistateInput", [
                 {
@@ -789,6 +949,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -804,6 +981,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -838,6 +1019,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -863,6 +1061,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -874,6 +1076,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -914,6 +1120,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -939,6 +1162,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -950,78 +1177,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
-            // switch action:
-            await endpoint2.configureReporting("genMultistateInput", [
-                {
-                    attribute: {ID: 0x0055 /* presentValue */, type: 0x21}, // uint16
-                    minimumReportInterval: 0,
-                    maximumReportInterval: constants.repInterval.MAX,
-                    reportableChange: 1,
-                },
-            ]);
-            const endpoint3 = device.getEndpoint(3);
-            await reporting.onOff(endpoint3, {
-                min: 0,
-                max: constants.repInterval.MAX,
-                change: 1,
-            });
-            const endpoint4 = device.getEndpoint(4);
-            await reporting.onOff(endpoint4, {
-                min: 0,
-                max: constants.repInterval.MAX,
-                change: 1,
-            });
-
-
-
-        },
-        ota: ota.zigbeeOTA,
-    },
-    {
-        zigbeeModel: [
-            "TS0002-SC",
-        ],
-        model: "ZG-2002-RF",
-        vendor: "Tuya-custom",
-        description: "Custom switch (https://github.com/romasku/tuya-zigbee-switch)",
-        extend: [
-            deviceEndpoints({ endpoints: {"switch_left": 1, "switch_right": 2, "relay_left": 3, "relay_right": 4, } }),
-            romasku.deviceConfig("device_config", "switch_left"),
-            romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
-            romasku.networkIndicator("network_led", "switch_left"),
-            onOff({ endpointNames: ["relay_left", "relay_right"] }),
-            romasku.pressAction("switch_left_press_action", "switch_left"),
-            romasku.switchMode("switch_left_mode", "switch_left"),
-            romasku.switchAction("switch_left_action_mode", "switch_left"),
-            romasku.relayMode("switch_left_relay_mode", "switch_left"),
-            romasku.relayIndex("switch_left_relay_index", "switch_left", 2),
-            romasku.bindedMode("switch_left_binded_mode", "switch_left"),
-            romasku.longPressDuration("switch_left_long_press_duration", "switch_left"),
-            romasku.levelMoveRate("switch_left_level_move_rate", "switch_left"),
-            romasku.pressAction("switch_right_press_action", "switch_right"),
-            romasku.switchMode("switch_right_mode", "switch_right"),
-            romasku.switchAction("switch_right_action_mode", "switch_right"),
-            romasku.relayMode("switch_right_relay_mode", "switch_right"),
-            romasku.relayIndex("switch_right_relay_index", "switch_right", 2),
-            romasku.bindedMode("switch_right_binded_mode", "switch_right"),
-            romasku.longPressDuration("switch_right_long_press_duration", "switch_right"),
-            romasku.levelMoveRate("switch_right_level_move_rate", "switch_right"),
-        ],
-        meta: { multiEndpoint: true },
-        configure: async (device, coordinatorEndpoint, logger) => {
-            const endpoint1 = device.getEndpoint(1);
-            await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
-            // switch action:
-            await endpoint1.configureReporting("genMultistateInput", [
-                {
-                    attribute: {ID: 0x0055 /* presentValue */, type: 0x21}, // uint16
-                    minimumReportInterval: 0,
-                    maximumReportInterval: constants.repInterval.MAX,
-                    reportableChange: 1,
-                },
-            ]);
-            const endpoint2 = device.getEndpoint(2);
-            await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -1062,6 +1221,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -1079,6 +1255,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -1122,6 +1302,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -1137,6 +1334,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -1171,6 +1372,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -1196,6 +1414,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -1207,6 +1429,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -1247,6 +1473,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_middle", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_middle_single", "switch_middle_single_hold", "switch_middle_single_release", "switch_middle_double", "switch_middle_double_hold", "switch_middle_double_release", "switch_middle_triple", "switch_middle_triple_hold", "switch_middle_triple_release", "switch_middle_position_on", "switch_middle_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -1282,6 +1525,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -1293,6 +1540,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -1304,6 +1555,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -1350,6 +1605,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_0"),
             romasku.networkIndicator("network_led", "switch_0"),
             onOff({ endpointNames: ["relay_0", "relay_1", "relay_2", "relay_3"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_0", "switch_1", "switch_2", "switch_3"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_0_single", "switch_0_single_hold", "switch_0_single_release", "switch_0_double", "switch_0_double_hold", "switch_0_double_release", "switch_0_triple", "switch_0_triple_hold", "switch_0_triple_release", "switch_0_position_on", "switch_0_position_off", "switch_1_single", "switch_1_single_hold", "switch_1_single_release", "switch_1_double", "switch_1_double_hold", "switch_1_double_release", "switch_1_triple", "switch_1_triple_hold", "switch_1_triple_release", "switch_1_position_on", "switch_1_position_off", "switch_2_single", "switch_2_single_hold", "switch_2_single_release", "switch_2_double", "switch_2_double_hold", "switch_2_double_release", "switch_2_triple", "switch_2_triple_hold", "switch_2_triple_release", "switch_2_position_on", "switch_2_position_off", "switch_3_single", "switch_3_single_hold", "switch_3_single_release", "switch_3_double", "switch_3_double_hold", "switch_3_double_release", "switch_3_triple", "switch_3_triple_hold", "switch_3_triple_release", "switch_3_position_on", "switch_3_position_off"])],
+            },
             romasku.pressAction("switch_0_press_action", "switch_0"),
             romasku.switchMode("switch_0_mode", "switch_0"),
             romasku.switchAction("switch_0_action_mode", "switch_0"),
@@ -1395,6 +1667,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -1406,6 +1682,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -1417,6 +1697,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -1428,6 +1712,10 @@ const definitions = [
             ]);
             const endpoint4 = device.getEndpoint(4);
             await reporting.bind(endpoint4, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint4.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint4.configureReporting("genMultistateInput", [
                 {
@@ -1482,6 +1770,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -1497,6 +1802,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -1533,6 +1842,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -1558,6 +1884,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -1569,6 +1899,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -1611,6 +1945,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_middle", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_middle_single", "switch_middle_single_hold", "switch_middle_single_release", "switch_middle_double", "switch_middle_double_hold", "switch_middle_double_release", "switch_middle_triple", "switch_middle_triple_hold", "switch_middle_triple_release", "switch_middle_position_on", "switch_middle_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -1646,6 +1997,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -1657,6 +2012,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -1668,6 +2027,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -1716,6 +2079,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_0"),
             romasku.networkIndicator("network_led", "switch_0"),
             onOff({ endpointNames: ["relay_0", "relay_1", "relay_2", "relay_3"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_0", "switch_1", "switch_2", "switch_3"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_0_single", "switch_0_single_hold", "switch_0_single_release", "switch_0_double", "switch_0_double_hold", "switch_0_double_release", "switch_0_triple", "switch_0_triple_hold", "switch_0_triple_release", "switch_0_position_on", "switch_0_position_off", "switch_1_single", "switch_1_single_hold", "switch_1_single_release", "switch_1_double", "switch_1_double_hold", "switch_1_double_release", "switch_1_triple", "switch_1_triple_hold", "switch_1_triple_release", "switch_1_position_on", "switch_1_position_off", "switch_2_single", "switch_2_single_hold", "switch_2_single_release", "switch_2_double", "switch_2_double_hold", "switch_2_double_release", "switch_2_triple", "switch_2_triple_hold", "switch_2_triple_release", "switch_2_position_on", "switch_2_position_off", "switch_3_single", "switch_3_single_hold", "switch_3_single_release", "switch_3_double", "switch_3_double_hold", "switch_3_double_release", "switch_3_triple", "switch_3_triple_hold", "switch_3_triple_release", "switch_3_position_on", "switch_3_position_off"])],
+            },
             romasku.pressAction("switch_0_press_action", "switch_0"),
             romasku.switchMode("switch_0_mode", "switch_0"),
             romasku.switchAction("switch_0_action_mode", "switch_0"),
@@ -1761,6 +2141,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -1772,6 +2156,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -1783,6 +2171,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -1794,6 +2186,10 @@ const definitions = [
             ]);
             const endpoint4 = device.getEndpoint(4);
             await reporting.bind(endpoint4, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint4.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint4.configureReporting("genMultistateInput", [
                 {
@@ -1846,6 +2242,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_middle", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_middle_single", "switch_middle_single_hold", "switch_middle_single_release", "switch_middle_double", "switch_middle_double_hold", "switch_middle_double_release", "switch_middle_triple", "switch_middle_triple_hold", "switch_middle_triple_release", "switch_middle_position_on", "switch_middle_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -1881,6 +2294,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -1892,6 +2309,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -1903,6 +2324,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -1949,6 +2374,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_0"),
             romasku.networkIndicator("network_led", "switch_0"),
             onOff({ endpointNames: ["relay_0", "relay_1", "relay_2", "relay_3"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_0", "switch_1", "switch_2", "switch_3"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_0_single", "switch_0_single_hold", "switch_0_single_release", "switch_0_double", "switch_0_double_hold", "switch_0_double_release", "switch_0_triple", "switch_0_triple_hold", "switch_0_triple_release", "switch_0_position_on", "switch_0_position_off", "switch_1_single", "switch_1_single_hold", "switch_1_single_release", "switch_1_double", "switch_1_double_hold", "switch_1_double_release", "switch_1_triple", "switch_1_triple_hold", "switch_1_triple_release", "switch_1_position_on", "switch_1_position_off", "switch_2_single", "switch_2_single_hold", "switch_2_single_release", "switch_2_double", "switch_2_double_hold", "switch_2_double_release", "switch_2_triple", "switch_2_triple_hold", "switch_2_triple_release", "switch_2_position_on", "switch_2_position_off", "switch_3_single", "switch_3_single_hold", "switch_3_single_release", "switch_3_double", "switch_3_double_hold", "switch_3_double_release", "switch_3_triple", "switch_3_triple_hold", "switch_3_triple_release", "switch_3_position_on", "switch_3_position_off"])],
+            },
             romasku.pressAction("switch_0_press_action", "switch_0"),
             romasku.switchMode("switch_0_mode", "switch_0"),
             romasku.switchAction("switch_0_action_mode", "switch_0"),
@@ -1994,6 +2436,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -2005,6 +2451,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -2016,6 +2466,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -2027,6 +2481,10 @@ const definitions = [
             ]);
             const endpoint4 = device.getEndpoint(4);
             await reporting.bind(endpoint4, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint4.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint4.configureReporting("genMultistateInput", [
                 {
@@ -2079,6 +2537,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -2094,6 +2569,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -2129,6 +2608,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -2144,6 +2640,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -2179,6 +2679,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -2204,6 +2721,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -2215,6 +2736,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -2255,6 +2780,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -2280,6 +2822,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -2291,6 +2837,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -2331,6 +2881,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_middle", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_middle_single", "switch_middle_single_hold", "switch_middle_single_release", "switch_middle_double", "switch_middle_double_hold", "switch_middle_double_release", "switch_middle_triple", "switch_middle_triple_hold", "switch_middle_triple_release", "switch_middle_position_on", "switch_middle_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -2366,6 +2933,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -2377,6 +2948,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -2388,6 +2963,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -2434,6 +3013,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -2459,6 +3055,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -2470,6 +3070,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -2510,6 +3114,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -2535,6 +3156,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -2546,6 +3171,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -2586,6 +3215,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -2601,6 +3247,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -2635,6 +3285,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -2660,6 +3327,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -2671,6 +3342,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -2711,6 +3386,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -2736,6 +3428,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -2747,6 +3443,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -2788,6 +3488,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -2803,6 +3520,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -2838,6 +3559,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_middle", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_middle_single", "switch_middle_single_hold", "switch_middle_single_release", "switch_middle_double", "switch_middle_double_hold", "switch_middle_double_release", "switch_middle_triple", "switch_middle_triple_hold", "switch_middle_triple_release", "switch_middle_position_on", "switch_middle_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -2873,6 +3611,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -2884,6 +3626,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -2895,6 +3641,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -2941,6 +3691,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -2956,6 +3723,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -2990,6 +3761,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -3015,6 +3803,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -3026,6 +3818,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -3066,6 +3862,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -3081,6 +3894,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -3115,6 +3932,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -3130,6 +3964,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -3165,6 +4003,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -3190,6 +4045,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -3201,6 +4060,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -3430,6 +4293,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -3445,6 +4325,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -3479,6 +4363,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -3494,6 +4395,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -3528,6 +4433,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -3543,6 +4465,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -3577,6 +4503,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -3592,6 +4535,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -3626,6 +4573,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -3641,6 +4605,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -3675,6 +4643,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -3690,6 +4675,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -3725,6 +4714,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_middle", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_middle_single", "switch_middle_single_hold", "switch_middle_single_release", "switch_middle_double", "switch_middle_double_hold", "switch_middle_double_release", "switch_middle_triple", "switch_middle_triple_hold", "switch_middle_triple_release", "switch_middle_position_on", "switch_middle_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -3760,6 +4766,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -3771,6 +4781,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -3782,6 +4796,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -3828,6 +4846,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_0"),
             romasku.networkIndicator("network_led", "switch_0"),
             onOff({ endpointNames: ["relay_0", "relay_1", "relay_2", "relay_3"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_0", "switch_1", "switch_2", "switch_3"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_0_single", "switch_0_single_hold", "switch_0_single_release", "switch_0_double", "switch_0_double_hold", "switch_0_double_release", "switch_0_triple", "switch_0_triple_hold", "switch_0_triple_release", "switch_0_position_on", "switch_0_position_off", "switch_1_single", "switch_1_single_hold", "switch_1_single_release", "switch_1_double", "switch_1_double_hold", "switch_1_double_release", "switch_1_triple", "switch_1_triple_hold", "switch_1_triple_release", "switch_1_position_on", "switch_1_position_off", "switch_2_single", "switch_2_single_hold", "switch_2_single_release", "switch_2_double", "switch_2_double_hold", "switch_2_double_release", "switch_2_triple", "switch_2_triple_hold", "switch_2_triple_release", "switch_2_position_on", "switch_2_position_off", "switch_3_single", "switch_3_single_hold", "switch_3_single_release", "switch_3_double", "switch_3_double_hold", "switch_3_double_release", "switch_3_triple", "switch_3_triple_hold", "switch_3_triple_release", "switch_3_position_on", "switch_3_position_off"])],
+            },
             romasku.pressAction("switch_0_press_action", "switch_0"),
             romasku.switchMode("switch_0_mode", "switch_0"),
             romasku.switchAction("switch_0_action_mode", "switch_0"),
@@ -3873,6 +4908,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -3884,6 +4923,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -3895,6 +4938,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -3906,6 +4953,10 @@ const definitions = [
             ]);
             const endpoint4 = device.getEndpoint(4);
             await reporting.bind(endpoint4, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint4.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint4.configureReporting("genMultistateInput", [
                 {
@@ -3958,6 +5009,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -3973,6 +5041,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -4007,6 +5079,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -4022,6 +5111,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -4056,6 +5149,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -4081,6 +5191,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -4092,6 +5206,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -4131,6 +5249,23 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch_left"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_middle", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_middle_single", "switch_middle_single_hold", "switch_middle_single_release", "switch_middle_double", "switch_middle_double_hold", "switch_middle_double_release", "switch_middle_triple", "switch_middle_triple_hold", "switch_middle_triple_release", "switch_middle_position_on", "switch_middle_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -4166,6 +5301,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -4177,6 +5316,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -4188,6 +5331,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -4234,6 +5381,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -4249,6 +5413,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -4283,6 +5451,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -4308,6 +5493,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -4319,6 +5508,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -4359,6 +5552,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_middle", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_middle_single", "switch_middle_single_hold", "switch_middle_single_release", "switch_middle_double", "switch_middle_double_hold", "switch_middle_double_release", "switch_middle_triple", "switch_middle_triple_hold", "switch_middle_triple_release", "switch_middle_position_on", "switch_middle_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -4394,6 +5604,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -4405,6 +5619,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -4416,6 +5634,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -4462,6 +5684,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_0"),
             romasku.networkIndicator("network_led", "switch_0"),
             onOff({ endpointNames: ["relay_0", "relay_1", "relay_2", "relay_3"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_0", "switch_1", "switch_2", "switch_3"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_0_single", "switch_0_single_hold", "switch_0_single_release", "switch_0_double", "switch_0_double_hold", "switch_0_double_release", "switch_0_triple", "switch_0_triple_hold", "switch_0_triple_release", "switch_0_position_on", "switch_0_position_off", "switch_1_single", "switch_1_single_hold", "switch_1_single_release", "switch_1_double", "switch_1_double_hold", "switch_1_double_release", "switch_1_triple", "switch_1_triple_hold", "switch_1_triple_release", "switch_1_position_on", "switch_1_position_off", "switch_2_single", "switch_2_single_hold", "switch_2_single_release", "switch_2_double", "switch_2_double_hold", "switch_2_double_release", "switch_2_triple", "switch_2_triple_hold", "switch_2_triple_release", "switch_2_position_on", "switch_2_position_off", "switch_3_single", "switch_3_single_hold", "switch_3_single_release", "switch_3_double", "switch_3_double_hold", "switch_3_double_release", "switch_3_triple", "switch_3_triple_hold", "switch_3_triple_release", "switch_3_position_on", "switch_3_position_off"])],
+            },
             romasku.pressAction("switch_0_press_action", "switch_0"),
             romasku.switchMode("switch_0_mode", "switch_0"),
             romasku.switchAction("switch_0_action_mode", "switch_0"),
@@ -4507,6 +5746,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -4518,6 +5761,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -4529,6 +5776,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -4540,6 +5791,10 @@ const definitions = [
             ]);
             const endpoint4 = device.getEndpoint(4);
             await reporting.bind(endpoint4, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint4.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint4.configureReporting("genMultistateInput", [
                 {
@@ -4592,6 +5847,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -4607,6 +5879,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -4641,6 +5917,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -4656,6 +5949,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -4690,6 +5987,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -4705,6 +6019,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -4739,6 +6057,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -4754,6 +6089,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -4788,6 +6127,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -4803,6 +6159,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -4837,6 +6197,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -4862,6 +6239,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -4873,6 +6254,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -4913,6 +6298,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -4928,6 +6330,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -4962,6 +6368,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -4977,6 +6400,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -5011,6 +6438,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -5026,6 +6470,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -5060,6 +6508,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -5075,6 +6540,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -5109,6 +6578,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -5124,6 +6610,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -5158,6 +6648,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -5173,6 +6680,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -5209,6 +6720,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -5234,6 +6762,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -5245,6 +6777,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -5286,6 +6822,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_middle", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_middle_single", "switch_middle_single_hold", "switch_middle_single_release", "switch_middle_double", "switch_middle_double_hold", "switch_middle_double_release", "switch_middle_triple", "switch_middle_triple_hold", "switch_middle_triple_release", "switch_middle_position_on", "switch_middle_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -5321,6 +6874,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -5332,6 +6889,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -5343,6 +6904,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -5389,6 +6954,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -5404,6 +6986,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -5438,6 +7024,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -5453,6 +7056,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -5487,6 +7094,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -5512,6 +7136,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -5523,6 +7151,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -5563,6 +7195,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_middle", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_middle_single", "switch_middle_single_hold", "switch_middle_single_release", "switch_middle_double", "switch_middle_double_hold", "switch_middle_double_release", "switch_middle_triple", "switch_middle_triple_hold", "switch_middle_triple_release", "switch_middle_position_on", "switch_middle_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -5598,6 +7247,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -5609,6 +7262,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -5620,6 +7277,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -5666,6 +7327,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -5681,6 +7359,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -5715,6 +7397,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -5740,6 +7439,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -5751,6 +7454,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -5791,6 +7498,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -5806,6 +7530,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -5840,6 +7568,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -5865,6 +7610,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -5876,6 +7625,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -5993,6 +7746,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -6008,6 +7778,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -6042,6 +7816,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -6067,6 +7858,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -6078,6 +7873,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -6118,6 +7917,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -6143,6 +7959,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -6154,6 +7974,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -6194,6 +8018,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -6209,6 +8050,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -6243,6 +8088,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -6258,6 +8120,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -6292,6 +8158,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -6307,6 +8190,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -6341,6 +8228,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_0"),
             romasku.networkIndicator("network_led", "switch_0"),
             onOff({ endpointNames: ["relay_0", "relay_1", "relay_2", "relay_3"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_0", "switch_1", "switch_2", "switch_3"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_0_single", "switch_0_single_hold", "switch_0_single_release", "switch_0_double", "switch_0_double_hold", "switch_0_double_release", "switch_0_triple", "switch_0_triple_hold", "switch_0_triple_release", "switch_0_position_on", "switch_0_position_off", "switch_1_single", "switch_1_single_hold", "switch_1_single_release", "switch_1_double", "switch_1_double_hold", "switch_1_double_release", "switch_1_triple", "switch_1_triple_hold", "switch_1_triple_release", "switch_1_position_on", "switch_1_position_off", "switch_2_single", "switch_2_single_hold", "switch_2_single_release", "switch_2_double", "switch_2_double_hold", "switch_2_double_release", "switch_2_triple", "switch_2_triple_hold", "switch_2_triple_release", "switch_2_position_on", "switch_2_position_off", "switch_3_single", "switch_3_single_hold", "switch_3_single_release", "switch_3_double", "switch_3_double_hold", "switch_3_double_release", "switch_3_triple", "switch_3_triple_hold", "switch_3_triple_release", "switch_3_position_on", "switch_3_position_off"])],
+            },
             romasku.pressAction("switch_0_press_action", "switch_0"),
             romasku.switchMode("switch_0_mode", "switch_0"),
             romasku.switchAction("switch_0_action_mode", "switch_0"),
@@ -6386,6 +8290,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -6397,6 +8305,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -6408,6 +8320,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -6419,6 +8335,10 @@ const definitions = [
             ]);
             const endpoint4 = device.getEndpoint(4);
             await reporting.bind(endpoint4, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint4.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint4.configureReporting("genMultistateInput", [
                 {
@@ -6471,6 +8391,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -6496,6 +8433,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -6507,6 +8448,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -6547,6 +8492,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -6572,6 +8534,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -6583,6 +8549,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -6623,6 +8593,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -6640,6 +8627,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -6682,6 +8673,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -6699,6 +8707,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -6740,6 +8752,23 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -6757,6 +8786,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -6799,6 +8832,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_0"),
             romasku.networkIndicator("network_led", "switch_0"),
             onOff({ endpointNames: ["relay_0", "relay_1", "relay_2", "relay_3"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_0", "switch_1", "switch_2", "switch_3"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_0_single", "switch_0_single_hold", "switch_0_single_release", "switch_0_double", "switch_0_double_hold", "switch_0_double_release", "switch_0_triple", "switch_0_triple_hold", "switch_0_triple_release", "switch_0_position_on", "switch_0_position_off", "switch_1_single", "switch_1_single_hold", "switch_1_single_release", "switch_1_double", "switch_1_double_hold", "switch_1_double_release", "switch_1_triple", "switch_1_triple_hold", "switch_1_triple_release", "switch_1_position_on", "switch_1_position_off", "switch_2_single", "switch_2_single_hold", "switch_2_single_release", "switch_2_double", "switch_2_double_hold", "switch_2_double_release", "switch_2_triple", "switch_2_triple_hold", "switch_2_triple_release", "switch_2_position_on", "switch_2_position_off", "switch_3_single", "switch_3_single_hold", "switch_3_single_release", "switch_3_double", "switch_3_double_hold", "switch_3_double_release", "switch_3_triple", "switch_3_triple_hold", "switch_3_triple_release", "switch_3_position_on", "switch_3_position_off"])],
+            },
             romasku.pressAction("switch_0_press_action", "switch_0"),
             romasku.switchMode("switch_0_mode", "switch_0"),
             romasku.switchAction("switch_0_action_mode", "switch_0"),
@@ -6844,6 +8894,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -6855,6 +8909,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -6866,6 +8924,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -6877,6 +8939,10 @@ const definitions = [
             ]);
             const endpoint4 = device.getEndpoint(4);
             await reporting.bind(endpoint4, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint4.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint4.configureReporting("genMultistateInput", [
                 {
@@ -6928,13 +8994,31 @@ const definitions = [
             deviceEndpoints({ endpoints: {"switch_0": 1, "switch_1": 2, "switch_2": 3, "switch_3": 4, } }),
             romasku.deviceConfig("device_config", "switch_0"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch_0"),
-            romasku.networkIndicator("network_led", "switch_0"),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_0", "switch_1", "switch_2", "switch_3"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_0_single", "switch_0_single_hold", "switch_0_single_release", "switch_0_double", "switch_0_double_hold", "switch_0_double_release", "switch_0_triple", "switch_0_triple_hold", "switch_0_triple_release", "switch_0_position_on", "switch_0_position_off", "switch_1_single", "switch_1_single_hold", "switch_1_single_release", "switch_1_double", "switch_1_double_hold", "switch_1_double_release", "switch_1_triple", "switch_1_triple_hold", "switch_1_triple_release", "switch_1_position_on", "switch_1_position_off", "switch_2_single", "switch_2_single_hold", "switch_2_single_release", "switch_2_double", "switch_2_double_hold", "switch_2_double_release", "switch_2_triple", "switch_2_triple_hold", "switch_2_triple_release", "switch_2_position_on", "switch_2_position_off", "switch_3_single", "switch_3_single_hold", "switch_3_single_release", "switch_3_double", "switch_3_double_hold", "switch_3_double_release", "switch_3_triple", "switch_3_triple_hold", "switch_3_triple_release", "switch_3_position_on", "switch_3_position_off"])],
+            },
             romasku.pressAction("switch_0_press_action", "switch_0"),
             romasku.switchMode("switch_0_mode", "switch_0"),
             romasku.switchAction("switch_0_action_mode", "switch_0"),
             romasku.bindedMode("switch_0_binded_mode", "switch_0"),
             romasku.longPressDuration("switch_0_long_press_duration", "switch_0"),
             romasku.levelMoveRate("switch_0_level_move_rate", "switch_0"),
+            romasku.confirmReleaseMs("switch_0_confirm_release_ms", "switch_0"),
+            romasku.maxPressCount("switch_0_max_press_count", "switch_0"),
             romasku.pressAction("switch_1_press_action", "switch_1"),
             romasku.switchMode("switch_1_mode", "switch_1"),
             romasku.switchAction("switch_1_action_mode", "switch_1"),
@@ -6964,6 +9048,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -6975,6 +9063,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -6986,6 +9078,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -6997,6 +9093,10 @@ const definitions = [
             ]);
             const endpoint4 = device.getEndpoint(4);
             await reporting.bind(endpoint4, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint4.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint4.configureReporting("genMultistateInput", [
                 {
@@ -7036,6 +9136,23 @@ const definitions = [
             deviceEndpoints({ endpoints: {"switch": 1, } }),
             romasku.deviceConfig("device_config", "switch"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -7049,6 +9166,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -7088,35 +9209,64 @@ const definitions = [
             deviceEndpoints({ endpoints: {"switch_0": 1, "switch_1": 2, "switch_2": 3, "switch_3": 4, } }),
             romasku.deviceConfig("device_config", "switch_0"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch_0"),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_0", "switch_1", "switch_2", "switch_3"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_0_single", "switch_0_single_hold", "switch_0_single_release", "switch_0_double", "switch_0_double_hold", "switch_0_double_release", "switch_0_triple", "switch_0_triple_hold", "switch_0_triple_release", "switch_0_position_on", "switch_0_position_off", "switch_1_single", "switch_1_single_hold", "switch_1_single_release", "switch_1_double", "switch_1_double_hold", "switch_1_double_release", "switch_1_triple", "switch_1_triple_hold", "switch_1_triple_release", "switch_1_position_on", "switch_1_position_off", "switch_2_single", "switch_2_single_hold", "switch_2_single_release", "switch_2_double", "switch_2_double_hold", "switch_2_double_release", "switch_2_triple", "switch_2_triple_hold", "switch_2_triple_release", "switch_2_position_on", "switch_2_position_off", "switch_3_single", "switch_3_single_hold", "switch_3_single_release", "switch_3_double", "switch_3_double_hold", "switch_3_double_release", "switch_3_triple", "switch_3_triple_hold", "switch_3_triple_release", "switch_3_position_on", "switch_3_position_off"])],
+            },
             romasku.pressAction("switch_0_press_action", "switch_0"),
             romasku.switchMode("switch_0_mode", "switch_0"),
             romasku.switchAction("switch_0_action_mode", "switch_0"),
             romasku.bindedMode("switch_0_binded_mode", "switch_0"),
             romasku.longPressDuration("switch_0_long_press_duration", "switch_0"),
             romasku.levelMoveRate("switch_0_level_move_rate", "switch_0"),
+            romasku.confirmReleaseMs("switch_0_confirm_release_ms", "switch_0"),
+            romasku.maxPressCount("switch_0_max_press_count", "switch_0"),
             romasku.pressAction("switch_1_press_action", "switch_1"),
             romasku.switchMode("switch_1_mode", "switch_1"),
             romasku.switchAction("switch_1_action_mode", "switch_1"),
             romasku.bindedMode("switch_1_binded_mode", "switch_1"),
             romasku.longPressDuration("switch_1_long_press_duration", "switch_1"),
             romasku.levelMoveRate("switch_1_level_move_rate", "switch_1"),
+            romasku.confirmReleaseMs("switch_1_confirm_release_ms", "switch_1"),
+            romasku.maxPressCount("switch_1_max_press_count", "switch_1"),
             romasku.pressAction("switch_2_press_action", "switch_2"),
             romasku.switchMode("switch_2_mode", "switch_2"),
             romasku.switchAction("switch_2_action_mode", "switch_2"),
             romasku.bindedMode("switch_2_binded_mode", "switch_2"),
             romasku.longPressDuration("switch_2_long_press_duration", "switch_2"),
             romasku.levelMoveRate("switch_2_level_move_rate", "switch_2"),
+            romasku.confirmReleaseMs("switch_2_confirm_release_ms", "switch_2"),
+            romasku.maxPressCount("switch_2_max_press_count", "switch_2"),
             romasku.pressAction("switch_3_press_action", "switch_3"),
             romasku.switchMode("switch_3_mode", "switch_3"),
             romasku.switchAction("switch_3_action_mode", "switch_3"),
             romasku.bindedMode("switch_3_binded_mode", "switch_3"),
             romasku.longPressDuration("switch_3_long_press_duration", "switch_3"),
             romasku.levelMoveRate("switch_3_level_move_rate", "switch_3"),
+            romasku.confirmReleaseMs("switch_3_confirm_release_ms", "switch_3"),
+            romasku.maxPressCount("switch_3_max_press_count", "switch_3"),
         ],
         meta: { multiEndpoint: true },
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -7128,6 +9278,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -7139,6 +9293,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -7150,6 +9308,10 @@ const definitions = [
             ]);
             const endpoint4 = device.getEndpoint(4);
             await reporting.bind(endpoint4, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint4.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint4.configureReporting("genMultistateInput", [
                 {
@@ -7190,6 +9352,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -7205,6 +9384,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -7239,6 +9422,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -7264,6 +9464,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -7275,6 +9479,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -7316,6 +9524,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_middle", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_middle_single", "switch_middle_single_hold", "switch_middle_single_release", "switch_middle_double", "switch_middle_double_hold", "switch_middle_double_release", "switch_middle_triple", "switch_middle_triple_hold", "switch_middle_triple_release", "switch_middle_position_on", "switch_middle_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -7351,6 +9576,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -7362,6 +9591,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -7373,6 +9606,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -7419,6 +9656,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_0"),
             romasku.networkIndicator("network_led", "switch_0"),
             onOff({ endpointNames: ["relay_0", "relay_1", "relay_2", "relay_3"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_0", "switch_1", "switch_2", "switch_3"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_0_single", "switch_0_single_hold", "switch_0_single_release", "switch_0_double", "switch_0_double_hold", "switch_0_double_release", "switch_0_triple", "switch_0_triple_hold", "switch_0_triple_release", "switch_0_position_on", "switch_0_position_off", "switch_1_single", "switch_1_single_hold", "switch_1_single_release", "switch_1_double", "switch_1_double_hold", "switch_1_double_release", "switch_1_triple", "switch_1_triple_hold", "switch_1_triple_release", "switch_1_position_on", "switch_1_position_off", "switch_2_single", "switch_2_single_hold", "switch_2_single_release", "switch_2_double", "switch_2_double_hold", "switch_2_double_release", "switch_2_triple", "switch_2_triple_hold", "switch_2_triple_release", "switch_2_position_on", "switch_2_position_off", "switch_3_single", "switch_3_single_hold", "switch_3_single_release", "switch_3_double", "switch_3_double_hold", "switch_3_double_release", "switch_3_triple", "switch_3_triple_hold", "switch_3_triple_release", "switch_3_position_on", "switch_3_position_off"])],
+            },
             romasku.pressAction("switch_0_press_action", "switch_0"),
             romasku.switchMode("switch_0_mode", "switch_0"),
             romasku.switchAction("switch_0_action_mode", "switch_0"),
@@ -7464,6 +9718,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -7475,6 +9733,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -7486,6 +9748,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -7497,6 +9763,10 @@ const definitions = [
             ]);
             const endpoint4 = device.getEndpoint(4);
             await reporting.bind(endpoint4, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint4.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint4.configureReporting("genMultistateInput", [
                 {
@@ -7550,6 +9820,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -7567,6 +9854,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -7610,6 +9901,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -7639,6 +9947,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -7650,6 +9962,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -7707,6 +10023,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_middle", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_middle_single", "switch_middle_single_hold", "switch_middle_single_release", "switch_middle_double", "switch_middle_double_hold", "switch_middle_double_release", "switch_middle_triple", "switch_middle_triple_hold", "switch_middle_triple_release", "switch_middle_position_on", "switch_middle_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -7742,6 +10075,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -7753,6 +10090,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -7764,6 +10105,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -7810,6 +10155,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -7827,6 +10189,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -7871,6 +10237,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -7900,6 +10283,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -7911,6 +10298,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -7968,6 +10359,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_middle", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_middle_single", "switch_middle_single_hold", "switch_middle_single_release", "switch_middle_double", "switch_middle_double_hold", "switch_middle_double_release", "switch_middle_triple", "switch_middle_triple_hold", "switch_middle_triple_release", "switch_middle_position_on", "switch_middle_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -8009,6 +10417,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -8020,6 +10432,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -8031,6 +10447,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -8101,6 +10521,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -8116,6 +10553,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -8151,6 +10592,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_middle", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_middle_single", "switch_middle_single_hold", "switch_middle_single_release", "switch_middle_double", "switch_middle_double_hold", "switch_middle_double_release", "switch_middle_triple", "switch_middle_triple_hold", "switch_middle_triple_release", "switch_middle_position_on", "switch_middle_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -8186,6 +10644,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -8197,6 +10659,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -8208,6 +10674,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -8255,6 +10725,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_0"),
             romasku.networkIndicator("network_led", "switch_0"),
             onOff({ endpointNames: ["relay_0", "relay_1", "relay_2", "relay_3"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_0", "switch_1", "switch_2", "switch_3"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_0_single", "switch_0_single_hold", "switch_0_single_release", "switch_0_double", "switch_0_double_hold", "switch_0_double_release", "switch_0_triple", "switch_0_triple_hold", "switch_0_triple_release", "switch_0_position_on", "switch_0_position_off", "switch_1_single", "switch_1_single_hold", "switch_1_single_release", "switch_1_double", "switch_1_double_hold", "switch_1_double_release", "switch_1_triple", "switch_1_triple_hold", "switch_1_triple_release", "switch_1_position_on", "switch_1_position_off", "switch_2_single", "switch_2_single_hold", "switch_2_single_release", "switch_2_double", "switch_2_double_hold", "switch_2_double_release", "switch_2_triple", "switch_2_triple_hold", "switch_2_triple_release", "switch_2_position_on", "switch_2_position_off", "switch_3_single", "switch_3_single_hold", "switch_3_single_release", "switch_3_double", "switch_3_double_hold", "switch_3_double_release", "switch_3_triple", "switch_3_triple_hold", "switch_3_triple_release", "switch_3_position_on", "switch_3_position_off"])],
+            },
             romasku.pressAction("switch_0_press_action", "switch_0"),
             romasku.switchMode("switch_0_mode", "switch_0"),
             romasku.switchAction("switch_0_action_mode", "switch_0"),
@@ -8300,6 +10787,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -8311,6 +10802,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -8322,6 +10817,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -8333,6 +10832,10 @@ const definitions = [
             ]);
             const endpoint4 = device.getEndpoint(4);
             await reporting.bind(endpoint4, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint4.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint4.configureReporting("genMultistateInput", [
                 {
@@ -8385,6 +10888,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -8402,6 +10922,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -8444,6 +10968,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -8471,6 +11012,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -8482,6 +11027,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -8530,6 +11079,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -8547,6 +11113,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -8590,6 +11160,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -8619,6 +11206,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -8630,6 +11221,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -8686,6 +11281,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -8715,6 +11327,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -8726,6 +11342,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -8782,6 +11402,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_middle", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_middle_single", "switch_middle_single_hold", "switch_middle_single_release", "switch_middle_double", "switch_middle_double_hold", "switch_middle_double_release", "switch_middle_triple", "switch_middle_triple_hold", "switch_middle_triple_release", "switch_middle_position_on", "switch_middle_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -8823,6 +11460,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -8834,6 +11475,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -8845,6 +11490,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -8915,6 +11564,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -8932,6 +11598,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -8974,6 +11644,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -9003,6 +11690,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -9014,6 +11705,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -9070,6 +11765,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_middle", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_middle_single", "switch_middle_single_hold", "switch_middle_single_release", "switch_middle_double", "switch_middle_double_hold", "switch_middle_double_release", "switch_middle_triple", "switch_middle_triple_hold", "switch_middle_triple_release", "switch_middle_position_on", "switch_middle_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -9111,6 +11823,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -9122,6 +11838,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -9133,6 +11853,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -9204,6 +11928,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_0"),
             romasku.networkIndicator("network_led", "switch_0"),
             onOff({ endpointNames: ["relay_0", "relay_1", "relay_2", "relay_3"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_0", "switch_1", "switch_2", "switch_3"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_0_single", "switch_0_single_hold", "switch_0_single_release", "switch_0_double", "switch_0_double_hold", "switch_0_double_release", "switch_0_triple", "switch_0_triple_hold", "switch_0_triple_release", "switch_0_position_on", "switch_0_position_off", "switch_1_single", "switch_1_single_hold", "switch_1_single_release", "switch_1_double", "switch_1_double_hold", "switch_1_double_release", "switch_1_triple", "switch_1_triple_hold", "switch_1_triple_release", "switch_1_position_on", "switch_1_position_off", "switch_2_single", "switch_2_single_hold", "switch_2_single_release", "switch_2_double", "switch_2_double_hold", "switch_2_double_release", "switch_2_triple", "switch_2_triple_hold", "switch_2_triple_release", "switch_2_position_on", "switch_2_position_off", "switch_3_single", "switch_3_single_hold", "switch_3_single_release", "switch_3_double", "switch_3_double_hold", "switch_3_double_release", "switch_3_triple", "switch_3_triple_hold", "switch_3_triple_release", "switch_3_position_on", "switch_3_position_off"])],
+            },
             romasku.pressAction("switch_0_press_action", "switch_0"),
             romasku.switchMode("switch_0_mode", "switch_0"),
             romasku.switchAction("switch_0_action_mode", "switch_0"),
@@ -9257,6 +11998,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -9268,6 +12013,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -9279,6 +12028,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -9290,6 +12043,10 @@ const definitions = [
             ]);
             const endpoint4 = device.getEndpoint(4);
             await reporting.bind(endpoint4, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint4.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint4.configureReporting("genMultistateInput", [
                 {
@@ -9374,6 +12131,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -9391,6 +12165,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -9433,6 +12211,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -9462,6 +12257,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -9473,6 +12272,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -9528,6 +12331,23 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -9545,6 +12365,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -9587,6 +12411,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -9602,6 +12443,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -9636,6 +12481,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -9661,6 +12523,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -9672,6 +12538,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -9712,6 +12582,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_middle", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_middle_single", "switch_middle_single_hold", "switch_middle_single_release", "switch_middle_double", "switch_middle_double_hold", "switch_middle_double_release", "switch_middle_triple", "switch_middle_triple_hold", "switch_middle_triple_release", "switch_middle_position_on", "switch_middle_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -9747,6 +12634,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -9758,6 +12649,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -9769,6 +12664,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -9815,6 +12714,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -9830,6 +12746,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -9864,6 +12784,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -9889,6 +12826,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -9900,6 +12841,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -9940,6 +12885,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_middle", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_middle_single", "switch_middle_single_hold", "switch_middle_single_release", "switch_middle_double", "switch_middle_double_hold", "switch_middle_double_release", "switch_middle_triple", "switch_middle_triple_hold", "switch_middle_triple_release", "switch_middle_position_on", "switch_middle_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -9975,6 +12937,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -9986,6 +12952,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -9997,6 +12967,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -10042,6 +13016,23 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch_left"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -10071,6 +13062,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -10082,6 +13077,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -10137,6 +13136,23 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch_left"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_middle", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_middle_single", "switch_middle_single_hold", "switch_middle_single_release", "switch_middle_double", "switch_middle_double_hold", "switch_middle_double_release", "switch_middle_triple", "switch_middle_triple_hold", "switch_middle_triple_release", "switch_middle_position_on", "switch_middle_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -10178,6 +13194,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -10189,6 +13209,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -10200,6 +13224,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -10269,6 +13297,23 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -10286,6 +13331,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -10327,6 +13376,23 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch_left"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -10356,6 +13422,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -10367,6 +13437,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -10422,6 +13496,23 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch_left"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_middle", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_middle_single", "switch_middle_single_hold", "switch_middle_single_release", "switch_middle_double", "switch_middle_double_hold", "switch_middle_double_release", "switch_middle_triple", "switch_middle_triple_hold", "switch_middle_triple_release", "switch_middle_position_on", "switch_middle_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -10463,6 +13554,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -10474,6 +13569,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -10485,6 +13584,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -10554,6 +13657,23 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -10571,6 +13691,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -10612,6 +13736,23 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch_left"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -10641,6 +13782,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -10652,6 +13797,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -10707,6 +13856,23 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch_left"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_middle", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_middle_single", "switch_middle_single_hold", "switch_middle_single_release", "switch_middle_double", "switch_middle_double_hold", "switch_middle_double_release", "switch_middle_triple", "switch_middle_triple_hold", "switch_middle_triple_release", "switch_middle_position_on", "switch_middle_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -10748,6 +13914,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -10759,6 +13929,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -10770,6 +13944,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -10840,6 +14018,23 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -10857,6 +14052,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -10899,6 +14098,23 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch_left"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -10928,6 +14144,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -10939,6 +14159,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -10995,6 +14219,23 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch_left"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_middle", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_middle_single", "switch_middle_single_hold", "switch_middle_single_release", "switch_middle_double", "switch_middle_double_hold", "switch_middle_double_release", "switch_middle_triple", "switch_middle_triple_hold", "switch_middle_triple_release", "switch_middle_position_on", "switch_middle_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -11036,6 +14277,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -11047,6 +14292,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -11058,6 +14307,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -11127,6 +14380,23 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch_0"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch_0"),
             onOff({ endpointNames: ["relay_0", "relay_1", "relay_2", "relay_3"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_0", "switch_1", "switch_2", "switch_3"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_0_single", "switch_0_single_hold", "switch_0_single_release", "switch_0_double", "switch_0_double_hold", "switch_0_double_release", "switch_0_triple", "switch_0_triple_hold", "switch_0_triple_release", "switch_0_position_on", "switch_0_position_off", "switch_1_single", "switch_1_single_hold", "switch_1_single_release", "switch_1_double", "switch_1_double_hold", "switch_1_double_release", "switch_1_triple", "switch_1_triple_hold", "switch_1_triple_release", "switch_1_position_on", "switch_1_position_off", "switch_2_single", "switch_2_single_hold", "switch_2_single_release", "switch_2_double", "switch_2_double_hold", "switch_2_double_release", "switch_2_triple", "switch_2_triple_hold", "switch_2_triple_release", "switch_2_position_on", "switch_2_position_off", "switch_3_single", "switch_3_single_hold", "switch_3_single_release", "switch_3_double", "switch_3_double_hold", "switch_3_double_release", "switch_3_triple", "switch_3_triple_hold", "switch_3_triple_release", "switch_3_position_on", "switch_3_position_off"])],
+            },
             romasku.pressAction("switch_0_press_action", "switch_0"),
             romasku.switchMode("switch_0_mode", "switch_0"),
             romasku.switchAction("switch_0_action_mode", "switch_0"),
@@ -11180,6 +14450,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -11191,6 +14465,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -11202,6 +14480,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -11213,6 +14495,10 @@ const definitions = [
             ]);
             const endpoint4 = device.getEndpoint(4);
             await reporting.bind(endpoint4, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint4.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint4.configureReporting("genMultistateInput", [
                 {
@@ -11296,6 +14582,23 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch_0"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch_0"),
             onOff({ endpointNames: ["relay_0", "relay_1", "relay_2", "relay_3"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_0", "switch_1", "switch_2", "switch_3"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_0_single", "switch_0_single_hold", "switch_0_single_release", "switch_0_double", "switch_0_double_hold", "switch_0_double_release", "switch_0_triple", "switch_0_triple_hold", "switch_0_triple_release", "switch_0_position_on", "switch_0_position_off", "switch_1_single", "switch_1_single_hold", "switch_1_single_release", "switch_1_double", "switch_1_double_hold", "switch_1_double_release", "switch_1_triple", "switch_1_triple_hold", "switch_1_triple_release", "switch_1_position_on", "switch_1_position_off", "switch_2_single", "switch_2_single_hold", "switch_2_single_release", "switch_2_double", "switch_2_double_hold", "switch_2_double_release", "switch_2_triple", "switch_2_triple_hold", "switch_2_triple_release", "switch_2_position_on", "switch_2_position_off", "switch_3_single", "switch_3_single_hold", "switch_3_single_release", "switch_3_double", "switch_3_double_hold", "switch_3_double_release", "switch_3_triple", "switch_3_triple_hold", "switch_3_triple_release", "switch_3_position_on", "switch_3_position_off"])],
+            },
             romasku.pressAction("switch_0_press_action", "switch_0"),
             romasku.switchMode("switch_0_mode", "switch_0"),
             romasku.switchAction("switch_0_action_mode", "switch_0"),
@@ -11349,6 +14652,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -11360,6 +14667,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -11371,6 +14682,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -11382,6 +14697,10 @@ const definitions = [
             ]);
             const endpoint4 = device.getEndpoint(4);
             await reporting.bind(endpoint4, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint4.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint4.configureReporting("genMultistateInput", [
                 {
@@ -11465,6 +14784,23 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch_left"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_middle", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_middle_single", "switch_middle_single_hold", "switch_middle_single_release", "switch_middle_double", "switch_middle_double_hold", "switch_middle_double_release", "switch_middle_triple", "switch_middle_triple_hold", "switch_middle_triple_release", "switch_middle_position_on", "switch_middle_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -11506,6 +14842,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -11517,6 +14857,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -11528,6 +14872,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -11598,6 +14946,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -11615,6 +14980,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -11657,6 +15026,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -11686,6 +15072,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -11697,6 +15087,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -11754,6 +15148,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -11771,6 +15182,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -11814,6 +15229,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -11843,6 +15275,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -11854,6 +15290,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -11910,6 +15350,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_middle", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_middle_single", "switch_middle_single_hold", "switch_middle_single_release", "switch_middle_double", "switch_middle_double_hold", "switch_middle_double_release", "switch_middle_triple", "switch_middle_triple_hold", "switch_middle_triple_release", "switch_middle_position_on", "switch_middle_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -11951,6 +15408,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -11962,6 +15423,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -11973,6 +15438,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -12043,6 +15512,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -12058,6 +15544,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -12092,6 +15582,23 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_0"),
             romasku.networkIndicator("network_led", "switch_0"),
             onOff({ endpointNames: ["relay_0", "relay_1", "relay_2", "relay_3"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_0", "switch_1", "switch_2", "switch_3"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_0_single", "switch_0_single_hold", "switch_0_single_release", "switch_0_double", "switch_0_double_hold", "switch_0_double_release", "switch_0_triple", "switch_0_triple_hold", "switch_0_triple_release", "switch_0_position_on", "switch_0_position_off", "switch_1_single", "switch_1_single_hold", "switch_1_single_release", "switch_1_double", "switch_1_double_hold", "switch_1_double_release", "switch_1_triple", "switch_1_triple_hold", "switch_1_triple_release", "switch_1_position_on", "switch_1_position_off", "switch_2_single", "switch_2_single_hold", "switch_2_single_release", "switch_2_double", "switch_2_double_hold", "switch_2_double_release", "switch_2_triple", "switch_2_triple_hold", "switch_2_triple_release", "switch_2_position_on", "switch_2_position_off", "switch_3_single", "switch_3_single_hold", "switch_3_single_release", "switch_3_double", "switch_3_double_hold", "switch_3_double_release", "switch_3_triple", "switch_3_triple_hold", "switch_3_triple_release", "switch_3_position_on", "switch_3_position_off"])],
+            },
             romasku.pressAction("switch_0_press_action", "switch_0"),
             romasku.switchMode("switch_0_mode", "switch_0"),
             romasku.switchAction("switch_0_action_mode", "switch_0"),
@@ -12137,6 +15644,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -12148,6 +15659,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -12159,6 +15674,10 @@ const definitions = [
             ]);
             const endpoint3 = device.getEndpoint(3);
             await reporting.bind(endpoint3, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint3.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint3.configureReporting("genMultistateInput", [
                 {
@@ -12170,6 +15689,10 @@ const definitions = [
             ]);
             const endpoint4 = device.getEndpoint(4);
             await reporting.bind(endpoint4, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint4.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint4.configureReporting("genMultistateInput", [
                 {
@@ -12222,6 +15745,23 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch_left"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -12251,6 +15791,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -12262,6 +15806,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
@@ -12317,6 +15865,23 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             onOff({ endpointNames: ["relay"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_single", "switch_single_hold", "switch_single_release", "switch_double", "switch_double_hold", "switch_double_release", "switch_triple", "switch_triple_hold", "switch_triple_release", "switch_position_on", "switch_position_off"])],
+            },
             romasku.pressAction("switch_press_action", "switch"),
             romasku.switchMode("switch_mode", "switch"),
             romasku.switchAction("switch_action_mode", "switch"),
@@ -12334,6 +15899,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -12375,6 +15944,23 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch_left"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
+{
+                fromZigbee: [{
+                    cluster: 'genMultistateInput',
+                    type: ['attributeReport', 'readResponse'],
+                    convert: (model, msg, publish, options, meta) => {
+                        // Endpoints 1..N are the switches, in switchNames order.
+                        const switchNames = ["switch_left", "switch_right"];
+                        if (msg.endpoint.ID > switchNames.length) return;
+                        const suffix = switchMultistateActionSuffix(
+                            msg.endpoint, msg.data["presentValue"]);
+                        if (suffix === undefined) return;
+                        return {action: `${switchNames[msg.endpoint.ID - 1]}_${suffix}`};
+                    },
+                }],
+                toZigbee: [],
+                exposes: [e.action(["switch_left_single", "switch_left_single_hold", "switch_left_single_release", "switch_left_double", "switch_left_double_hold", "switch_left_double_release", "switch_left_triple", "switch_left_triple_hold", "switch_left_triple_release", "switch_left_position_on", "switch_left_position_off", "switch_right_single", "switch_right_single_hold", "switch_right_single_release", "switch_right_double", "switch_right_double_hold", "switch_right_double_release", "switch_right_triple", "switch_right_triple_hold", "switch_right_triple_release", "switch_right_position_on", "switch_right_position_off"])],
+            },
             romasku.pressAction("switch_left_press_action", "switch_left"),
             romasku.switchMode("switch_left_mode", "switch_left"),
             romasku.switchAction("switch_left_action_mode", "switch_left"),
@@ -12404,6 +15990,10 @@ const definitions = [
         configure: async (device, coordinatorEndpoint, logger) => {
             const endpoint1 = device.getEndpoint(1);
             await reporting.bind(endpoint1, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint1.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint1.configureReporting("genMultistateInput", [
                 {
@@ -12415,6 +16005,10 @@ const definitions = [
             ]);
             const endpoint2 = device.getEndpoint(2);
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genMultistateInput"]);
+            // Caches numberOfStates, which tells firmware with multi-press support
+            // apart from firmware without it. Non-fatal: the action handler falls
+            // back to the legacy mapping when the value is not available.
+            await endpoint2.read("genMultistateInput", ["numberOfStates"]).catch(() => {});
             // switch action:
             await endpoint2.configureReporting("genMultistateInput", [
                 {
