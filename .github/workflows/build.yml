@@ -64,13 +64,21 @@ jobs:
         echo "=== built files ==="
         ls -l bin/router/SWITCH_BSEED_TS0726_4GANG/
 
+    - name: Build 1-gang firmware (SWITCH_BSEED_TS0726_1GANG, router)
+      run: |
+        source .venv/bin/activate
+        BOARD=SWITCH_BSEED_TS0726_1GANG DEVICE_TYPE=router make board/build
+        echo "=== built files ==="
+        ls -l bin/router/SWITCH_BSEED_TS0726_1GANG/
+
     - name: Upload firmware artifact
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: bseed-4gang-pr380
+        name: bseed-pr380
         path: |
           bin/router/SWITCH_BSEED_TS0726_4GANG/
+          bin/router/SWITCH_BSEED_TS0726_1GANG/
           zigbee2mqtt/ota/index_router.json
         if-no-files-found: warn
 
