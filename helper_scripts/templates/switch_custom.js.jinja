@@ -520,7 +520,11 @@ const definitions = [
                     {%- set _ = action_values.append(switchName ~ '_' ~ s) -%}
                 {%- endfor -%}
             {%- endfor -%}
+            // Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
             {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],

@@ -460,7 +460,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_0"),
             romasku.networkIndicator("network_led", "switch_0"),
             onOff({ endpointNames: ["relay_0", "relay_1", "relay_2", "relay_3"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -623,7 +627,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_0"),
             romasku.networkIndicator("network_led", "switch_0"),
             onOff({ endpointNames: ["relay_0", "relay_1", "relay_2", "relay_3"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -786,7 +794,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_0"),
             romasku.networkIndicator("network_led", "switch_0"),
             onOff({ endpointNames: ["relay_0", "relay_1", "relay_2", "relay_3"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -949,7 +961,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -1019,7 +1035,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -1120,7 +1140,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -1221,7 +1245,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -1302,7 +1330,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -1372,7 +1404,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -1473,7 +1509,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -1605,7 +1645,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_0"),
             romasku.networkIndicator("network_led", "switch_0"),
             onOff({ endpointNames: ["relay_0", "relay_1", "relay_2", "relay_3"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -1770,7 +1814,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -1842,7 +1890,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -1945,7 +1997,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -2079,7 +2135,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_0"),
             romasku.networkIndicator("network_led", "switch_0"),
             onOff({ endpointNames: ["relay_0", "relay_1", "relay_2", "relay_3"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -2242,7 +2302,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -2374,7 +2438,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_0"),
             romasku.networkIndicator("network_led", "switch_0"),
             onOff({ endpointNames: ["relay_0", "relay_1", "relay_2", "relay_3"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -2537,7 +2605,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -2608,7 +2680,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -2679,7 +2755,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -2780,7 +2860,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -2881,7 +2965,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -3013,7 +3101,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -3114,7 +3206,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -3215,7 +3311,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -3285,7 +3385,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -3386,7 +3490,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -3488,7 +3596,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -3559,7 +3671,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -3691,7 +3807,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -3761,7 +3881,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -3862,7 +3986,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -3932,7 +4060,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -4003,7 +4135,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -4293,7 +4429,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -4363,7 +4503,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -4433,7 +4577,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -4503,7 +4651,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -4573,7 +4725,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -4643,7 +4799,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -4714,7 +4874,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -4846,7 +5010,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_0"),
             romasku.networkIndicator("network_led", "switch_0"),
             onOff({ endpointNames: ["relay_0", "relay_1", "relay_2", "relay_3"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -5009,7 +5177,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -5079,7 +5251,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -5149,7 +5325,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -5249,7 +5429,11 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch_left"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -5381,7 +5565,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -5451,7 +5639,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -5552,7 +5744,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -5684,7 +5880,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_0"),
             romasku.networkIndicator("network_led", "switch_0"),
             onOff({ endpointNames: ["relay_0", "relay_1", "relay_2", "relay_3"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -5847,7 +6047,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -5917,7 +6121,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -5987,7 +6195,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -6057,7 +6269,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -6127,7 +6343,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -6197,7 +6417,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -6298,7 +6522,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -6368,7 +6596,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -6438,7 +6670,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -6508,7 +6744,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -6578,7 +6818,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -6648,7 +6892,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -6720,7 +6968,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -6822,7 +7074,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -6954,7 +7210,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -7024,7 +7284,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -7094,7 +7358,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -7195,7 +7463,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -7327,7 +7599,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -7397,7 +7673,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -7498,7 +7778,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -7568,7 +7852,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -7746,7 +8034,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -7816,7 +8108,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -7917,7 +8213,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -8018,7 +8318,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -8088,7 +8392,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -8158,7 +8466,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -8228,7 +8540,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_0"),
             romasku.networkIndicator("network_led", "switch_0"),
             onOff({ endpointNames: ["relay_0", "relay_1", "relay_2", "relay_3"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -8391,7 +8707,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -8492,7 +8812,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -8593,7 +8917,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -8673,7 +9001,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -8752,7 +9084,11 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -8832,7 +9168,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_0"),
             romasku.networkIndicator("network_led", "switch_0"),
             onOff({ endpointNames: ["relay_0", "relay_1", "relay_2", "relay_3"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -8994,7 +9334,11 @@ const definitions = [
             deviceEndpoints({ endpoints: {"switch_0": 1, "switch_1": 2, "switch_2": 3, "switch_3": 4, } }),
             romasku.deviceConfig("device_config", "switch_0"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch_0"),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -9136,7 +9480,11 @@ const definitions = [
             deviceEndpoints({ endpoints: {"switch": 1, } }),
             romasku.deviceConfig("device_config", "switch"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -9209,7 +9557,11 @@ const definitions = [
             deviceEndpoints({ endpoints: {"switch_0": 1, "switch_1": 2, "switch_2": 3, "switch_3": 4, } }),
             romasku.deviceConfig("device_config", "switch_0"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch_0"),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -9352,7 +9704,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -9422,7 +9778,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -9524,7 +9884,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -9656,7 +10020,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_0"),
             romasku.networkIndicator("network_led", "switch_0"),
             onOff({ endpointNames: ["relay_0", "relay_1", "relay_2", "relay_3"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -9820,7 +10188,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -9901,7 +10273,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -10023,7 +10399,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -10155,7 +10535,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -10237,7 +10621,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -10359,7 +10747,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -10521,7 +10913,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -10592,7 +10988,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -10725,7 +11125,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_0"),
             romasku.networkIndicator("network_led", "switch_0"),
             onOff({ endpointNames: ["relay_0", "relay_1", "relay_2", "relay_3"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -10888,7 +11292,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -10968,7 +11376,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -11079,7 +11491,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -11160,7 +11576,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -11281,7 +11701,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -11402,7 +11826,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -11564,7 +11992,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -11644,7 +12076,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -11765,7 +12201,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -11928,7 +12368,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_0"),
             romasku.networkIndicator("network_led", "switch_0"),
             onOff({ endpointNames: ["relay_0", "relay_1", "relay_2", "relay_3"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -12131,7 +12575,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -12211,7 +12659,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -12331,7 +12783,11 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -12411,7 +12867,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -12481,7 +12941,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -12582,7 +13046,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -12714,7 +13182,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -12784,7 +13256,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -12885,7 +13361,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -13016,7 +13496,11 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch_left"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -13136,7 +13620,11 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch_left"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -13297,7 +13785,11 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -13376,7 +13868,11 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch_left"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -13496,7 +13992,11 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch_left"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -13657,7 +14157,11 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -13736,7 +14240,11 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch_left"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -13856,7 +14364,11 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch_left"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -14018,7 +14530,11 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -14098,7 +14614,11 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch_left"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -14219,7 +14739,11 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch_left"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -14380,7 +14904,11 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch_0"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch_0"),
             onOff({ endpointNames: ["relay_0", "relay_1", "relay_2", "relay_3"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -14582,7 +15110,11 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch_0"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch_0"),
             onOff({ endpointNames: ["relay_0", "relay_1", "relay_2", "relay_3"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -14784,7 +15316,11 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch_left"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -14946,7 +15482,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -15026,7 +15566,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -15148,7 +15692,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -15229,7 +15777,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -15350,7 +15902,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             romasku.networkIndicator("network_led", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_middle", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -15512,7 +16068,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             romasku.networkIndicator("network_led", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -15582,7 +16142,11 @@ const definitions = [
             romasku.multiPressResetCount("multi_press_reset_count", "switch_0"),
             romasku.networkIndicator("network_led", "switch_0"),
             onOff({ endpointNames: ["relay_0", "relay_1", "relay_2", "relay_3"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -15745,7 +16309,11 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch_left"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -15865,7 +16433,11 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch"),
             onOff({ endpointNames: ["relay"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
@@ -15944,7 +16516,11 @@ const definitions = [
             romasku.deviceConfig("device_config", "switch_left"),
             romasku.multiPressResetCount("multi_press_reset_count", "switch_left"),
             onOff({ endpointNames: ["relay_left", "relay_right"] }),
-{
+// Custom modern-extend: emits the friendly `action` from the raw
+            // multistate value. isModernExtend marks it so z-h-c merges it rather
+            // than rejecting the definition as a legacy extend.
+            {
+                isModernExtend: true,
                 fromZigbee: [{
                     cluster: 'genMultistateInput',
                     type: ['attributeReport', 'readResponse'],
