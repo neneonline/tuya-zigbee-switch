@@ -535,7 +535,7 @@ const definitions = [
                     },
                 }],
                 toZigbee: [],
-                exposes: [e.action({{ action_values | tojson }})],
+                exposes: [e.presets.action({{ action_values | tojson }})],
             },
             {% endif %}
             {% for switchName in device.switchNames %}
