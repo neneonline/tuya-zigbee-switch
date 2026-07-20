@@ -78,7 +78,7 @@ ATTR_TEST_CASES = [
         name="Multistate Number of States",
         cluster=ZCL_CLUSTER_MULTISTATE_INPUT_BASIC,
         attr=ZCL_ATTR_MULTISTATE_INPUT_NUMBER_OF_STATES,
-        expected="10",  # default max_press_count=2 → 3*2+4=10
+        expected="7",  # default max_press_count=1 → 3*1+4=7
     ),
     AttrValueTestCase(
         name="Multistate Present Value",

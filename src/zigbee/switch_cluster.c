@@ -30,9 +30,12 @@ const uint8_t multistate_flags          = 0;
 #define MULTISTATE_N_HOLD(n)       ((n) == 1u ? MULTISTATE_LONG_PRESS : (3u * (n) + 2u))
 #define MULTISTATE_N_RELEASE(n)    ((n) == 1u ? 6u : (3u * (n) + 3u))
 
-// Default timer durations (used when cluster fields are 0)
+// Default timer durations (used when cluster fields are 0).
+// max_press_count defaults to 1 so an upgrade is behaviour-preserving: with
+// max_press_count == 1 there is nothing to disambiguate, so the press is reported
+// on release with no confirm wait. Multi-press is opt-in per switch by raising it.
 #define DEFAULT_CONFIRM_RELEASE_MS    200u
-#define DEFAULT_MAX_PRESS_COUNT       2u
+#define DEFAULT_MAX_PRESS_COUNT       1u
 
 extern zigbee_relay_cluster relay_clusters[];
 extern uint8_t relay_clusters_cnt;
@@ -482,6 +485,8 @@ void switch_cluster_on_button_release(zigbee_switch_cluster *cluster) {
 
     hal_tasks_unschedule(&cluster->timer_hold);
 
+    bool confirm_now = false;
+
     if (cluster->in_hold) {
         // End of hold: emit release multistate briefly, then reset
         cluster->multistate_state = MULTISTATE_N_RELEASE(cluster->n_press);
@@ -501,14 +506,29 @@ void switch_cluster_on_button_release(zigbee_switch_cluster *cluster) {
         if (cluster->binded_mode == ZCL_ONOFF_CONFIGURATION_BINDED_MODE_SHORT) {
             switch_cluster_binding_action_on(cluster);
         }
-        // Arm confirm timer for new action_N_press
-        hal_tasks_schedule(&cluster->timer_confirm, cluster->confirm_release_ms);
+        if (cluster->max_press_count <= 1) {
+            // Nothing to disambiguate: no further press can change the count, so
+            // the press value is already final. Report it without waiting out
+            // confirm_release_ms. This is what keeps a max_press_count == 1
+            // switch as responsive as it was before multi-press existed.
+            confirm_now = true;
+        } else {
+            // Arm confirm timer for new action_N_press
+            hal_tasks_schedule(&cluster->timer_confirm, cluster->confirm_release_ms);
+        }
     }
 
     cluster->multistate_state = MULTISTATE_NOT_PRESSED;
     hal_zigbee_notify_attribute_changed(cluster->endpoint,
                                         ZCL_CLUSTER_MULTISTATE_INPUT_BASIC,
                                         ZCL_ATTR_MULTISTATE_INPUT_PRESENT_VALUE);
+
+    // Emit after the not-pressed report so the value sequence on the wire is
+    // identical to the timed path (press -> not_pressed -> press_count), just
+    // without the delay.
+    if (confirm_now) {
+        switch_cluster_timer_confirm_cb(cluster);
+    }
 }
 
 void synchronize_multistate_state(zigbee_switch_cluster *cluster) {
@@ -548,6 +568,24 @@ void switch_cluster_on_write_attr(zigbee_switch_cluster *cluster,
         } else {
             cluster->button->pressed_when_high = 0;
         }
+    }
+    // 0 is the "unset" sentinel that lets an NV record written by older firmware
+    // fall back to the default. Apply it here too, so the value means the same
+    // thing whether it was set at boot or written at runtime — otherwise a
+    // written 0 behaves as 0 until the next power cycle and as the default after.
+    if (attribute_id == ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_CONFIRM_RELEASE_DUR) {
+        if (cluster->confirm_release_ms == 0) {
+            cluster->confirm_release_ms = DEFAULT_CONFIRM_RELEASE_MS;
+        }
+    }
+    if (attribute_id == ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_MAX_PRESS_COUNT) {
+        if (cluster->max_press_count == 0) {
+            cluster->max_press_count = DEFAULT_MAX_PRESS_COUNT;
+        }
+        // Keep the advertised state count in step with the values we can emit;
+        // add_to_endpoint and the NV load path both do this already.
+        cluster->multistate_num_of_states =
+            (uint16_t)(3u * cluster->max_press_count + 4u);
     }
     switch_cluster_store_attrs_to_nv(cluster);
 }

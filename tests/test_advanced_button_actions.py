@@ -4,6 +4,9 @@ Tests for the multi-press reporting system (2-timer state machine).
 Architecture:
   - timer_hold  fires at long_press_duration_ms after press  → hold event (value persists during hold)
   - timer_confirm fires at confirm_release_ms after release  → N-press event (value persists until next press)
+  - max_press_count == 1 (the default) skips timer_confirm entirely: with no
+    second press possible the count is already final, so the N-press event is
+    reported on release. Multi-press is opt-in by raising max_press_count.
   - Backward compatibility: relay_mode / binded_mode still work unchanged
 
 Multistate values:
@@ -25,9 +28,11 @@ import pytest
 
 from tests.conftest import Device, RelayButtonPair, StubProc
 from tests.zcl_consts import (
+    ZCL_ATTR_MULTISTATE_INPUT_NUMBER_OF_STATES,
     ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_CONFIRM_RELEASE_DUR,
     ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_MAX_PRESS_COUNT,
     ZCL_CLUSTER_LEVEL_CONTROL,
+    ZCL_CLUSTER_MULTISTATE_INPUT_BASIC,
     ZCL_CLUSTER_ON_OFF,
     ZCL_CLUSTER_ON_OFF_SWITCH_CONFIG,
     ZCL_CMD_LEVEL_MOVE_WITH_ON_OFF,
@@ -76,6 +81,7 @@ def test_double_press_multistate_is_7(
 ):
     """Double click reports multistate=7 (double_press) after confirm timer."""
     ep = relay_button_pair.switch_endpoint
+    momentary_detached.zcl_switch_max_press_count_set(ep, 2)
     momentary_detached.click_button(relay_button_pair.button_pin)
     momentary_detached.click_button(relay_button_pair.button_pin)
     momentary_detached.step_time(CONFIRM_STEP_MS)
@@ -133,6 +139,7 @@ def test_hold_n2_multistate_is_8(
 ):
     """N=2 hold must produce multistate == 8 (double_hold)."""
     ep = relay_button_pair.switch_endpoint
+    momentary_detached.zcl_switch_max_press_count_set(ep, 2)
 
     # First click (release before timer_hold fires)
     momentary_detached.press_button(relay_button_pair.button_pin)
@@ -168,6 +175,48 @@ def test_max_press_count_clamps_n(
     assert momentary_detached.zcl_switch_get_multistate_value(ep) == "5"
 
 
+def test_max_press_count_1_reports_without_confirm_delay(
+    momentary_detached: Device, relay_button_pair: RelayButtonPair
+):
+    """max_press_count=1: nothing to disambiguate, so single_press is reported on
+    release rather than after confirm_release_ms."""
+    ep = relay_button_pair.switch_endpoint
+    momentary_detached.zcl_switch_max_press_count_set(ep, 1)
+
+    momentary_detached.click_button(relay_button_pair.button_pin)
+    # Well inside the 200 ms confirm window — the value must already be there.
+    momentary_detached.step_time(50)
+    assert momentary_detached.zcl_switch_get_multistate_value(ep) == "5"
+
+
+def test_confirm_release_dur_zero_falls_back_to_default(
+    momentary_detached: Device, relay_button_pair: RelayButtonPair
+):
+    """0 is the "unset" sentinel: writing it must apply the default immediately,
+    not behave as 0 until the next reboot."""
+    ep = relay_button_pair.switch_endpoint
+    momentary_detached.zcl_switch_confirm_release_dur_set(ep, 0)
+    assert momentary_detached.read_zigbee_attr(
+        ep,
+        ZCL_CLUSTER_ON_OFF_SWITCH_CONFIG,
+        ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_CONFIRM_RELEASE_DUR,
+    ) == "200"
+
+
+def test_max_press_count_write_updates_number_of_states(
+    momentary_detached: Device, relay_button_pair: RelayButtonPair
+):
+    """numberOfStates must track max_press_count without needing a reboot,
+    otherwise the device emits values outside its own declared range."""
+    ep = relay_button_pair.switch_endpoint
+    momentary_detached.zcl_switch_max_press_count_set(ep, 3)
+    assert momentary_detached.read_zigbee_attr(
+        ep,
+        ZCL_CLUSTER_MULTISTATE_INPUT_BASIC,
+        ZCL_ATTR_MULTISTATE_INPUT_NUMBER_OF_STATES,
+    ) == "13"  # 3*3+4
+
+
 def test_max_press_count_readable_as_attr(
     momentary_detached: Device, relay_button_pair: RelayButtonPair
 ):
@@ -191,6 +240,8 @@ def test_confirm_release_dur_short(
 ):
     """confirm_release_dur=100ms: single_press reported after 100ms, not after 200ms."""
     ep = relay_button_pair.switch_endpoint
+    # max_press_count > 1 is what makes the confirm timer run at all.
+    momentary_detached.zcl_switch_max_press_count_set(ep, 2)
     momentary_detached.zcl_switch_confirm_release_dur_set(ep, 100)
 
     momentary_detached.click_button(relay_button_pair.button_pin)
@@ -332,6 +383,7 @@ def test_simultaneous_presses_are_independent(
         device.zcl_switch_mode_set(ep, ZCL_ONOFF_CONFIGURATION_SWITCH_TYPE_MOMENTARY)
         device.zcl_switch_relay_mode_set(ep, ZCL_ONOFF_CONFIGURATION_RELAY_MODE_DETACHED)
         device.zcl_switch_binding_mode_set(ep, 0)
+        device.zcl_switch_max_press_count_set(ep, 2)
 
     # Button A: double-click
     device.click_button(pair_a.button_pin)
