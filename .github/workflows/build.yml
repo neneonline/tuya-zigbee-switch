@@ -2,9 +2,9 @@ name: Build Firmware
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - test/pr380-4gang
+  # NOTE: push trigger intentionally removed. The firmware is already built and
+  # committed; auto-rebuilding on every push wastes ~15 min and always fails at the
+  # "Commit changes" step because the fork's Actions token is read-only.
 
 jobs:
   build:
