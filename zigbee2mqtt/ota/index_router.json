@@ -1,19 +1,5 @@
 [
   {
-    "fileName": "tlc_switch-1.1.2-e7a1ff5d.zigbee",
-    "fileVersion": 285356044,
-    "fileSize": 181730,
-    "url": "https://github.com/neneonline/tuya-zigbee-switch/raw/refs/heads/feat/multigesture-fixes/bin/router/SWITCH_BSEED_TS0726_4GANG/tlc_switch-1.1.2-e7a1ff5d.zigbee",
-    "imageType": 43627,
-    "manufacturerCode": 4417,
-    "sha512": "25d6a21a52c60f6b21e184ba9d1ef35b6260f79879e9b6a824d32a90de247d7aeaa902526c15bb5d34430e9bad17e9c35f08a8dbec716ac03cc4e6e5dcb4efc3",
-    "otaHeaderString": "Telink OTA Image\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000",
-    "manufacturerName": [
-      "_TZ3002_pzao9ls1",
-      "pzao9ls1"
-    ]
-  },
-  {
     "fileName": "tlc_switch-1.1.2-e7a1ff5d-from_tuya.zigbee",
     "fileVersion": 4294967295,
     "fileSize": 181730,
@@ -39,6 +25,20 @@
     "manufacturerName": [
       "_TZ3002_jn2x20tg",
       "jn2x20tg"
+    ]
+  },
+  {
+    "fileName": "tlc_switch-1.1.2-6f279f3e.zigbee",
+    "fileVersion": 285356050,
+    "fileSize": 182082,
+    "url": "https://github.com/neneonline/tuya-zigbee-switch/raw/refs/heads/feat/multigesture-fixes/bin/router/SWITCH_BSEED_TS0726_4GANG/tlc_switch-1.1.2-6f279f3e.zigbee",
+    "imageType": 43627,
+    "manufacturerCode": 4417,
+    "sha512": "0e74c2ec44cf7a7147f0657bb059cc2853027acc0875e5465324b22441bcc6ec5e570c0ae3bc6756f989b40b895edea2fd89d8a0211439d93c5480aec2008d82",
+    "otaHeaderString": "Telink OTA Image\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000",
+    "manufacturerName": [
+      "_TZ3002_pzao9ls1",
+      "pzao9ls1"
     ]
   }
 ]
