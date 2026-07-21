@@ -495,6 +495,17 @@ void switch_cluster_on_button_release(zigbee_switch_cluster *cluster) {
         hal_zigbee_notify_attribute_changed(cluster->endpoint,
                                             ZCL_CLUSTER_MULTISTATE_INPUT_BASIC,
                                             ZCL_ATTR_MULTISTATE_INPUT_PRESENT_VALUE);
+        // The release value is transient: it is overwritten with
+        // MULTISTATE_NOT_PRESSED below, in this same call, before the SDK's
+        // deferred reporting samples the attribute - so it never reaches the
+        // network on its own. Send the report directly while the attribute
+        // still holds the release value.
+        hal_zigbee_send_report_attr(cluster->endpoint,
+                                    ZCL_CLUSTER_MULTISTATE_INPUT_BASIC,
+                                    ZCL_ATTR_MULTISTATE_INPUT_PRESENT_VALUE,
+                                    ZCL_DATA_TYPE_UINT16,
+                                    &cluster->multistate_state,
+                                    sizeof(cluster->multistate_state));
         switch_cluster_level_stop(cluster);
         cluster->n_press = 0;
         cluster->in_hold = 0;
